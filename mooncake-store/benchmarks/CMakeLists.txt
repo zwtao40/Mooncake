@@ -28,6 +28,13 @@ target_link_libraries(
   allocation_strategy_bench PRIVATE mooncake_store cachelib_memory_allocator
                                     gflags::gflags glog::glog pthread)
 
+# Add stress cluster benchmark executable
+add_executable(stress_cluster_bench stress_cluster_bench.cpp)
+set_target_properties(stress_cluster_bench PROPERTIES CXX_STANDARD 17
+                                                      CXX_STANDARD_REQUIRED ON)
+target_link_libraries(stress_cluster_bench PRIVATE mooncake_store gflags::gflags
+                                                   glog::glog numa pthread)
+
 # Add NoF worker pool benchmark executable
 if(USE_NOF)
   add_executable(nof_worker_pool_bench nof_worker_pool_bench.cpp)
