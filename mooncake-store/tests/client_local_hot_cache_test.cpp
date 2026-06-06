@@ -150,7 +150,7 @@ class LocalHotCacheTest : public ::testing::Test {
         }
 
         // Check size compatibility with the block's available capacity
-        if (slice.size > block->size) {
+        if (slice.size > block->capacity) {
             // Slice too big for this block, return block to pool
             block->key_.clear();
             cache.PutHotKey(block);
@@ -406,6 +406,23 @@ TEST_F(LocalHotCacheTest, LRUEviction) {
     EXPECT_FALSE(cache.HasHotKey("key1"));  // Should be evicted
     EXPECT_TRUE(cache.HasHotKey("key2"));
     EXPECT_TRUE(cache.HasHotKey("key3"));
+}
+
+TEST_F(LocalHotCacheTest, ReusedBlockKeepsOriginalCapacity) {
+    const size_t block_size = 4 * 1024 * 1024;
+    LocalHotCache cache(block_size, block_size);
+
+    Slice small_slice = CreateSlice(1024, 'S');
+    EXPECT_TRUE(PutHotKeyHelper(cache, "small", small_slice));
+
+    Slice larger_slice = CreateSlice(2 * 1024 * 1024, 'L');
+    EXPECT_TRUE(PutHotKeyHelper(cache, "larger", larger_slice));
+
+    EXPECT_FALSE(cache.HasHotKey("small"));
+    HotMemBlock* block = cache.GetHotKey("larger");
+    VerifySliceData(block, larger_slice.size, 'L');
+    EXPECT_EQ(block->capacity, block_size);
+    cache.ReleaseHotKey("larger");
 }
 
 // Test GetHotKey updates LRU

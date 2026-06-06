@@ -1,0 +1,98 @@
+diff --git a/mooncake-store/include/local_hot_cache.h b/mooncake-store/include/local_hot_cache.h
+index ce37f7b8..8347df44 100644
+--- a/mooncake-store/include/local_hot_cache.h
++++ b/mooncake-store/include/local_hot_cache.h
+@@ -24,11 +24,12 @@ namespace mooncake {
+  */
+ struct HotMemBlock {
+     void* addr;
++    size_t capacity;
+     size_t size;
+     std::atomic<int> ref_count;
+     std::string key_;
+     std::atomic<bool> accessed{false};  // Deferred LRU touch flag
+-    HotMemBlock() : addr(nullptr), size(0), ref_count(0) {}
++    HotMemBlock() : addr(nullptr), capacity(0), size(0), ref_count(0) {}
+ };
+ 
+ /**
+diff --git a/mooncake-store/src/local_hot_cache.cpp b/mooncake-store/src/local_hot_cache.cpp
+index b4ad027f..d0c928d7 100644
+--- a/mooncake-store/src/local_hot_cache.cpp
++++ b/mooncake-store/src/local_hot_cache.cpp
+@@ -56,7 +56,8 @@ LocalHotCache::LocalHotCache(size_t total_size_bytes, size_t block_size_bytes,
+     for (size_t i = 0; i < block_num; ++i) {
+         auto block = std::make_unique<HotMemBlock>();
+         block->addr = base_ptr + i * block_size_;
+-        block->size = block_size_;
++        block->capacity = block_size_;
++        block->size = 0;
+         block->ref_count = 0;
+         block->key_.clear();
+         lru_queue_.push_back(block.get());
+@@ -311,7 +312,7 @@ bool LocalHotCacheHandler::SubmitPutTask(const std::string& key,
+     }
+ 
+     // Check size compatibility
+-    if (slice.size > block->size) {
++    if (slice.size > block->capacity) {
+         // Slice too big for block, return block to pool
+         block->key_.clear();
+         hot_cache_->PutHotKey(block);
+diff --git a/mooncake-store/tests/client_local_hot_cache_test.cpp b/mooncake-store/tests/client_local_hot_cache_test.cpp
+index d16192e1..182d7fbc 100644
+--- a/mooncake-store/tests/client_local_hot_cache_test.cpp
++++ b/mooncake-store/tests/client_local_hot_cache_test.cpp
+@@ -150,7 +150,7 @@ class LocalHotCacheTest : public ::testing::Test {
+         }
+ 
+         // Check size compatibility with the block's available capacity
+-        if (slice.size > block->size) {
++        if (slice.size > block->capacity) {
+             // Slice too big for this block, return block to pool
+             block->key_.clear();
+             cache.PutHotKey(block);
+@@ -408,6 +408,23 @@ TEST_F(LocalHotCacheTest, LRUEviction) {
+     EXPECT_TRUE(cache.HasHotKey("key3"));
+ }
+ 
++TEST_F(LocalHotCacheTest, ReusedBlockKeepsOriginalCapacity) {
++    const size_t block_size = 4 * 1024 * 1024;
++    LocalHotCache cache(block_size, block_size);
++
++    Slice small_slice = CreateSlice(1024, 'S');
++    EXPECT_TRUE(PutHotKeyHelper(cache, "small", small_slice));
++
++    Slice larger_slice = CreateSlice(2 * 1024 * 1024, 'L');
++    EXPECT_TRUE(PutHotKeyHelper(cache, "larger", larger_slice));
++
++    EXPECT_FALSE(cache.HasHotKey("small"));
++    HotMemBlock* block = cache.GetHotKey("larger");
++    VerifySliceData(block, larger_slice.size, 'L');
++    EXPECT_EQ(block->capacity, block_size);
++    cache.ReleaseHotKey("larger");
++}
++
+ // Test GetHotKey updates LRU
+ TEST_F(LocalHotCacheTest, GetHotKeyUpdatesLRU) {
+     const size_t cache_size =
+diff --git a/mooncake-store/tests/client_tcp_local_memcpy_test.cpp b/mooncake-store/tests/client_tcp_local_memcpy_test.cpp
+index 289ba85a..14afd831 100644
+--- a/mooncake-store/tests/client_tcp_local_memcpy_test.cpp
++++ b/mooncake-store/tests/client_tcp_local_memcpy_test.cpp
+@@ -129,7 +129,7 @@ bool PutHotKeyHelper(LocalHotCache& cache, const std::string& key,
+     if (block == nullptr) {
+         return false;
+     }
+-    if (slice.size > block->size) {
++    if (slice.size > block->capacity) {
+         block->key_.clear();
+         cache.PutHotKey(block);
+         return false;
+@@ -505,4 +505,4 @@ INSTANTIATE_TEST_SUITE_P(
+     });
+ 
+ }  // namespace testing
+-}  // namespace mooncake
+\ No newline at end of file
++}  // namespace mooncake

@@ -24,11 +24,12 @@ namespace mooncake {
  */
 struct HotMemBlock {
     void* addr;
+    size_t capacity;
     size_t size;
     std::atomic<int> ref_count;
     std::string key_;
     std::atomic<bool> accessed{false};  // Deferred LRU touch flag
-    HotMemBlock() : addr(nullptr), size(0), ref_count(0) {}
+    HotMemBlock() : addr(nullptr), capacity(0), size(0), ref_count(0) {}
 };
 
 /**

@@ -129,7 +129,7 @@ bool PutHotKeyHelper(LocalHotCache& cache, const std::string& key,
     if (block == nullptr) {
         return false;
     }
-    if (slice.size > block->size) {
+    if (slice.size > block->capacity) {
         block->key_.clear();
         cache.PutHotKey(block);
         return false;

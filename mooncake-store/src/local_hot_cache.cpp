@@ -56,7 +56,8 @@ LocalHotCache::LocalHotCache(size_t total_size_bytes, size_t block_size_bytes,
     for (size_t i = 0; i < block_num; ++i) {
         auto block = std::make_unique<HotMemBlock>();
         block->addr = base_ptr + i * block_size_;
-        block->size = block_size_;
+        block->capacity = block_size_;
+        block->size = 0;
         block->ref_count = 0;
         block->key_.clear();
         lru_queue_.push_back(block.get());
@@ -311,7 +312,7 @@ bool LocalHotCacheHandler::SubmitPutTask(const std::string& key,
     }
 
     // Check size compatibility
-    if (slice.size > block->size) {
+    if (slice.size > block->capacity) {
         // Slice too big for block, return block to pool
         block->key_.clear();
         hot_cache_->PutHotKey(block);
