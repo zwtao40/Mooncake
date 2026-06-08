@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <glog/logging.h>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include "config.h"
@@ -856,7 +857,18 @@ int UrmaEndpoint::submitPostSend(
                             (int)slice_list.size());
     wr_count =
         std::min(int(globalConfig().max_jfc_e) - *jfc_outstanding_, wr_count);
-    if (wr_count <= 0) return 0;
+    if (wr_count <= 0) {
+        static std::atomic<uint64_t> no_room_log_count{0};
+        auto log_index =
+            no_room_log_count.fetch_add(1, std::memory_order_relaxed);
+        if (log_index < 16) {
+            LOG(INFO) << "[UB_DEBUG] no room to post, pending="
+                      << slice_list.size() << " jetty_index=" << jetty_index
+                      << " jetty_depth=" << wr_depth_list_[jetty_index]
+                      << " jfc_outstanding=" << *jfc_outstanding_;
+        }
+        return 0;
+    }
 
     urma_jfs_wr_t wr_list[wr_count], *bad_wr = nullptr;
     urma_sge_t l_sge_list[wr_count];
@@ -907,8 +919,22 @@ int UrmaEndpoint::submitPostSend(
     __sync_fetch_and_add(jfc_outstanding_, wr_count);
     if (jetty_list_[jetty_index]->remote_jetty == NULL) {
     }
+    static std::atomic<uint64_t> post_wr_log_count{0};
+    auto post_log_index =
+        post_wr_log_count.fetch_add(1, std::memory_order_relaxed);
+    if (post_log_index < 16) {
+        LOG(INFO) << "[UB_DEBUG] urma_post wr_count=" << wr_count
+                  << " jetty_index=" << jetty_index
+                  << " local_jetty=" << jetty_list_[jetty_index]->jetty_id.id
+                  << " jfc=" << jetty_list_[jetty_index]
+                                  ->jetty_cfg.jfs_cfg.jfc->jfc_id.id
+                  << " first_slice=" << slice_list[0];
+    }
     int rc =
         urma_post_jetty_send_wr(jetty_list_[jetty_index], wr_list, &bad_wr);
+    if (!rc && post_log_index < 16) {
+        LOG(INFO) << "[UB_DEBUG] urma_post success wr_count=" << wr_count;
+    }
     if (rc) {
         PLOG(ERROR) << "Failed to urma_post_jetty_send_wr";
         while (bad_wr) {

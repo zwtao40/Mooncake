@@ -271,6 +271,15 @@ int UbWorkerPool::submitPostSend(
     }
     submitted_slice_count_.fetch_add(submitted_slice_count,
                                      std::memory_order_relaxed);
+    static std::atomic<uint64_t> submit_log_count{0};
+    auto log_index = submit_log_count.fetch_add(1, std::memory_order_relaxed);
+    if (log_index < 16) {
+        LOG(INFO) << "[UB_DEBUG] queued slices=" << submitted_slice_count
+                  << " total_submitted="
+                  << submitted_slice_count_.load(std::memory_order_relaxed)
+                  << " total_processed="
+                  << processed_slice_count_.load(std::memory_order_relaxed);
+    }
     if (suspended_flag_.load(std::memory_order_relaxed)) cond_var_.notify_all();
     return 0;
 }
@@ -361,7 +370,16 @@ void UbWorkerPool::performPostSend(int thread_id) {
             entry.second.clear();
             continue;
         }
+        auto before = entry.second.size();
         endpoint->submitPostSend(entry.second, failed_slice_list);
+        static std::atomic<uint64_t> post_log_count{0};
+        auto log_index = post_log_count.fetch_add(1, std::memory_order_relaxed);
+        if (log_index < 16) {
+            LOG(INFO) << "[UB_DEBUG] post peer=" << entry.first
+                      << " before=" << before
+                      << " remaining=" << entry.second.size()
+                      << " failed_list=" << failed_slice_list.size();
+        }
 #endif
     }
 
@@ -379,6 +397,15 @@ void UbWorkerPool::performPoll(int thread_id) {
          jfc_index += kTransferWorkerCount) {
         UbTransport::Slice* cr[kPollCount];
         int nr_poll = context_.poll(kPollCount, cr, jfc_index);
+        if (nr_poll > 0) {
+            static std::atomic<uint64_t> poll_log_count{0};
+            auto log_index =
+                poll_log_count.fetch_add(1, std::memory_order_relaxed);
+            if (log_index < 16) {
+                LOG(INFO) << "[UB_DEBUG] poll jfc=" << jfc_index
+                          << " nr_poll=" << nr_poll;
+            }
+        }
         if (nr_poll < 0) {
             LOG(ERROR) << "Worker: Failed to poll jetty for complete";
             continue;
@@ -487,7 +514,13 @@ void UbWorkerPool::transferWorker(int thread_id) {
             if (curr_wait_ts - last_wait_ts > kWaitPeriodInNano) {
                 std::unique_lock<std::mutex> lock(cond_mutex_);
                 suspended_flag_.fetch_add(1);
-                cond_var_.wait_for(lock, std::chrono::seconds(1));
+                // Match RDMA worker behavior: re-check after taking the
+                // condition lock so a submit racing with suspend cannot leave
+                // this worker asleep with pending slices.
+                if (processed_slice_count_.load(std::memory_order_relaxed) ==
+                    submitted_slice_count_.load(std::memory_order_relaxed)) {
+                    cond_var_.wait_for(lock, std::chrono::seconds(1));
+                }
                 suspended_flag_.fetch_sub(1);
                 last_wait_ts = curr_wait_ts;
             }

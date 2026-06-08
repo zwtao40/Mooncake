@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
 #include <future>
 #include "config.h"
 #include "memory_location.h"
@@ -185,6 +186,15 @@ Status UbTransport::submitTransfer(
     }
     size_t task_id = batch_desc.task_list.size();
     batch_desc.task_list.resize(task_id + entries.size());
+    for (const auto& request : entries) {
+        auto& task = batch_desc.task_list[task_id++];
+        task.batch_id = batch_id;
+#ifdef USE_ASCEND_HETEROGENEOUS
+        task.request = const_cast<Transport::TransferRequest*>(&request);
+#else
+        task.request = &request;
+#endif
+    }
     std::vector<TransferTask*> task_list;
     task_list.reserve(batch_desc.task_list.size());
     for (auto& task : batch_desc.task_list) task_list.push_back(&task);
@@ -330,6 +340,17 @@ Status UbTransport::getTransferStatus(BatchID batch_id, size_t task_id,
         task.is_finished = true;
     } else {
         status.s = WAITING;
+        static std::atomic<uint64_t> waiting_log_count{0};
+        auto log_index =
+            waiting_log_count.fetch_add(1, std::memory_order_relaxed);
+        if (log_index < 16) {
+            LOG(INFO) << "[UB_DEBUG] waiting batch_id=" << batch_id
+                      << " task_id=" << task_id
+                      << " slice_count=" << task.slice_count
+                      << " success=" << success_slice_count
+                      << " failed=" << failed_slice_count
+                      << " transferred=" << status.transferred_bytes;
+        }
     }
     return Status::OK();
 }
