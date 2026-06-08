@@ -413,10 +413,11 @@ void UbWorkerPool::performPoll(int thread_id) {
         for (int i = 0; i < nr_poll; ++i) {
             UbTransport::Slice* slice = cr[i];
             assert(slice);
-            if (jetty_depth_set.count(slice->ub.jetty_depth))
-                jetty_depth_set[slice->ub.jetty_depth]++;
+            auto jetty_depth = slice->ub.jetty_depth;
+            if (jetty_depth_set.count(jetty_depth))
+                jetty_depth_set[jetty_depth]++;
             else
-                jetty_depth_set[slice->ub.jetty_depth] = 1;
+                jetty_depth_set[jetty_depth] = 1;
             if (cr[i]->status != Transport::Slice::SUCCESS) {
                 failed_nr_polls++;
                 if (context_.active() && failed_nr_polls > 32 &&
@@ -436,7 +437,7 @@ void UbWorkerPool::performPoll(int thread_id) {
                     redispatch_counter_++;
                 }
             } else {
-                // slice->markSuccess();
+                slice->markSuccess();
                 processed_slice_count++;
                 success_nr_polls++;
             }

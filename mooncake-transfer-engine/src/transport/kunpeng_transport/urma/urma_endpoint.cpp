@@ -526,17 +526,18 @@ int UrmaContext::poll(int num_entries, Transport::Slice** slices,
                    << device_name_;
         return ERR_CONTEXT;
     }
-    Transport::Slice s[nr_poll];
+    int valid_poll_count = 0;
     for (int i = 0; i < nr_poll; ++i) {
         auto slice = (Transport::Slice*)cr[i].user_ctx;
         if (!slice) {
             continue;
         }
+        slices[valid_poll_count++] = slice;
         if (cr[i].status == URMA_CR_SUCCESS) {
-            slice->markSuccess();
-            slices[i] = slice;
+            slice->status = Transport::Slice::SUCCESS;
             continue;
         }
+        slice->status = Transport::Slice::FAILED;
         if (cr[i].status != URMA_CR_WR_FLUSH_ERR ||
             show_work_request_flushed_error_)
             LOG(ERROR) << "Worker: Process failed for slice (opcode: "
@@ -555,7 +556,7 @@ int UrmaContext::poll(int num_entries, Transport::Slice** slices,
                        << jfc_list_[jfc_index].native->comp_events_acked << " "
                        << jfc_list_[jfc_index].native->async_events_acked;
     }
-    return nr_poll;
+    return valid_poll_count;
 }
 
 volatile int* UrmaContext::outstandingCount(int jfc_index) {
