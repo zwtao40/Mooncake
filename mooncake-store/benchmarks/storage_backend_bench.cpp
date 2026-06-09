@@ -68,6 +68,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -75,7 +76,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <latch>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -162,6 +162,42 @@ namespace {
 constexpr size_t KB = 1024;
 constexpr size_t MB = 1024 * KB;
 constexpr size_t GB = 1024 * MB;
+
+class SimpleLatch {
+   public:
+    explicit SimpleLatch(size_t count) : count_(count) {}
+
+    SimpleLatch(const SimpleLatch&) = delete;
+    SimpleLatch& operator=(const SimpleLatch&) = delete;
+
+    void count_down() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (count_ == 0) return;
+        --count_;
+        if (count_ == 0) cv_.notify_all();
+    }
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return count_ == 0; });
+    }
+
+    void arrive_and_wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (count_ == 0) return;
+        --count_;
+        if (count_ == 0) {
+            cv_.notify_all();
+            return;
+        }
+        cv_.wait(lock, [this] { return count_ == 0; });
+    }
+
+   private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    size_t count_;
+};
 
 // Alignment for potential future O_DIRECT support (not currently used)
 constexpr size_t kAlignment = 4096;  // 4KB page alignment
@@ -1495,8 +1531,8 @@ void BenchConcurrentLoad(BackendType type, const std::string& storage_path,
     stats.Clear();
     stats.InitThreads(num_threads, ops_per_thread);
 
-    std::latch start_latch(num_threads + 1);
-    std::latch end_latch(num_threads);
+    SimpleLatch start_latch(num_threads + 1);
+    SimpleLatch end_latch(num_threads);
     std::vector<std::thread> threads;
 
     for (size_t t = 0; t < num_threads; ++t) {
@@ -1805,8 +1841,8 @@ void BenchMixedRW(BackendType type, const std::string& storage_path,
     write_stats.InitThreads(write_threads, num_operations);
 
     std::atomic<size_t> next_write_key{initial_keys};
-    std::latch start_latch(total_threads + 1);
-    std::latch end_latch(total_threads);
+    SimpleLatch start_latch(total_threads + 1);
+    SimpleLatch end_latch(total_threads);
     std::vector<std::thread> threads;
 
     // Create reader threads
