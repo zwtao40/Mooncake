@@ -5126,16 +5126,29 @@ void MasterService::BatchEvict(double evict_ratio_target,
     long evicted_count = 0;
     long object_count = 0;
     uint64_t total_freed_size = 0;
+    long skipped_no_durable_replica = 0;
 
     // Candidates for second pass eviction
     std::vector<std::chrono::system_clock::time_point> no_pin_objects;
     std::vector<std::chrono::system_clock::time_point> soft_pin_objects;
 
-    auto can_evict_replicas = [](const ObjectMetadata& metadata) {
+    auto has_completed_durable_replica = [](const ObjectMetadata& metadata) {
+        return metadata.HasReplica([](const Replica& replica) {
+            return (replica.is_local_disk_replica() ||
+                    replica.is_disk_replica()) &&
+                   replica.is_completed();
+        });
+    };
+
+    auto has_evictable_memory_replica = [](const ObjectMetadata& metadata) {
         return metadata.HasReplica([](const Replica& replica) {
             return replica.is_memory_replica() && replica.is_completed() &&
                    replica.get_refcnt() == 0;
         });
+    };
+
+    auto can_evict_replicas = [&](const ObjectMetadata& metadata) {
+        return has_evictable_memory_replica(metadata);
     };
 
     auto evict_replicas = [](ObjectMetadata& metadata) {
@@ -5155,10 +5168,6 @@ void MasterService::BatchEvict(double evict_ratio_target,
             ? static_cast<long>(offloading_queue_limit_ * kOffloadCapRatio)
             : 0;
 
-    auto has_local_disk_replica = [](const ObjectMetadata& metadata) {
-        return metadata.HasReplica(&Replica::fn_is_local_disk_replica);
-    };
-
     // Returns freed bytes. Returns 0 if offload-queued and no additional
     // replicas were evicted (all MEMORY replicas of the key are now pinned).
     auto try_evict_or_offload =
@@ -5166,12 +5175,15 @@ void MasterService::BatchEvict(double evict_ratio_target,
                   ObjectMetadata& metadata,
                   TenantState& tenant_state) -> uint64_t {
         if (!offload_on_evict_) {
-            // Original behavior
+            if (!has_completed_durable_replica(metadata)) {
+                skipped_no_durable_replica++;
+                return 0;
+            }
             return metadata.size * evict_replicas(metadata);
         }
 
-        // LOCAL_DISK replica already exists — safe to delete MEMORY immediately
-        if (has_local_disk_replica(metadata)) {
+        // Durable replica already exists, so it is safe to delete MEMORY.
+        if (has_completed_durable_replica(metadata)) {
             return metadata.size * evict_replicas(metadata);
         }
 
@@ -5544,6 +5556,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
             << ", offload_deferred=" << offload_deferred_count
             << ", offload_cap_forced=" << offload_cap_forced_count
             << ", offload_push_failed_forced=" << offload_push_failed_forced
+            << ", skipped_no_durable_replica="
+            << skipped_no_durable_replica
             << ", total_freed_size=" << total_freed_size;
     if (offload_on_evict_ && evicted_count == 0 && offload_deferred_count > 0) {
         LOG(WARNING) << "[EVICT] No memory freed this cycle; "

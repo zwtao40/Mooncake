@@ -1,5 +1,7 @@
 #include "file_storage.h"
 
+#include <algorithm>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -86,6 +88,10 @@ FileStorageConfig FileStorageConfig::FromEnvironment() {
         GetEnvOr<uint64_t>("MOONCAKE_OFFLOAD_CLIENT_BUFFER_GC_TTL_MS",
                            config.client_buffer_gc_ttl_ms);
 
+    config.offload_worker_threads =
+        GetEnvOr<uint32_t>("MOONCAKE_OFFLOAD_WORKER_THREADS",
+                           config.offload_worker_threads);
+
     auto use_uring_str =
         GetEnvStringOr("MOONCAKE_OFFLOAD_USE_URING",
                        GetEnvStringOr("MOONCAKE_USE_URING", "false"));
@@ -169,6 +175,10 @@ bool FileStorageConfig::Validate() const {
     }
     if (heartbeat_interval_seconds <= 0) {
         LOG(ERROR) << "FileStorageConfig: heartbeat_interval_seconds must > 0";
+        return false;
+    }
+    if (offload_worker_threads == 0) {
+        LOG(ERROR) << "FileStorageConfig: offload_worker_threads must > 0";
         return false;
     }
     return true;
@@ -579,6 +589,60 @@ tl::expected<bool, ErrorCode> FileStorage::IsEnableOffloading() {
     return enable_offloading;
 }
 
+tl::expected<void, ErrorCode> FileStorage::OffloadObjectsConcurrently(
+    const std::vector<OffloadTaskItem>& offloading_objects) {
+    if (offloading_objects.empty()) {
+        return {};
+    }
+
+    const uint32_t worker_count = std::min<uint32_t>(
+        config_.offload_worker_threads,
+        static_cast<uint32_t>(offloading_objects.size()));
+    if (worker_count <= 1) {
+        return OffloadObjects(offloading_objects);
+    }
+
+    std::vector<std::vector<OffloadTaskItem>> shards(worker_count);
+    for (size_t i = 0; i < offloading_objects.size(); ++i) {
+        shards[i % worker_count].push_back(offloading_objects[i]);
+    }
+
+    LOG(INFO) << "Offloading " << offloading_objects.size()
+              << " object(s) with " << worker_count << " worker(s)";
+
+    std::vector<std::future<tl::expected<void, ErrorCode>>> futures;
+    futures.reserve(worker_count);
+    auto run_offload = [this](std::vector<OffloadTaskItem> shard) {
+        return OffloadObjects(shard);
+    };
+    for (auto& shard : shards) {
+        if (shard.empty()) {
+            continue;
+        }
+        futures.emplace_back(
+            std::async(std::launch::async, run_offload, std::move(shard)));
+    }
+
+    ErrorCode first_error = ErrorCode::OK;
+    size_t failed_workers = 0;
+    for (auto& future : futures) {
+        auto result = future.get();
+        if (!result) {
+            if (first_error == ErrorCode::OK) {
+                first_error = result.error();
+            }
+            ++failed_workers;
+        }
+    }
+
+    if (first_error != ErrorCode::OK) {
+        LOG(ERROR) << "Concurrent offload failed in " << failed_workers
+                   << " worker(s), first_error=" << first_error;
+        return tl::make_unexpected(first_error);
+    }
+    return {};
+}
+
 tl::expected<void, ErrorCode> FileStorage::Heartbeat() {
     if (client_ == nullptr) {
         LOG(ERROR) << "client is nullptr";
@@ -667,7 +731,7 @@ tl::expected<void, ErrorCode> FileStorage::Heartbeat() {
         return {};
     }
     // === STEP 2: Persist offloaded objects (trigger actual data migration) ===
-    auto offload_result = OffloadObjects(offloading_objects);
+    auto offload_result = OffloadObjectsConcurrently(offloading_objects);
     if (!offload_result) {
         LOG(ERROR) << "Failed to persist objects with error: "
                    << offload_result.error();

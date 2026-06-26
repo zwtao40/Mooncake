@@ -226,6 +226,10 @@ struct FileStorageConfig {
     uint32_t client_buffer_gc_interval_seconds = 1;
     uint64_t client_buffer_gc_ttl_ms = 5000;
 
+    // Number of concurrent workers used to process one heartbeat's offload
+    // task batch. 1 preserves the original serial behavior.
+    uint32_t offload_worker_threads = 1;
+
     // Use io_uring for file I/O instead of POSIX pread/pwrite
     bool use_uring = false;
 
