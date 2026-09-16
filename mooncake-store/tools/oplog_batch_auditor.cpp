@@ -6,7 +6,11 @@
 #include <map>
 #include <string_view>
 
-#include <jsoncpp/json/json.h>
+#if __has_include(<jsoncpp/json/json.h>)
+#include <jsoncpp/json/json.h>  // Ubuntu
+#else
+#include <json/json.h>  // CentOS
+#endif
 
 #include "ha/oplog/oplog_batch_codec.h"
 #include "ha/oplog/oplog_types.h"
@@ -159,6 +163,7 @@ OpLogAuditReport AuditOpLogNamespace(const std::string& cluster_id,
             } else if (suffix.size() == kOpLogBatchIdWidth) {
                 AddError(&report, "malformed legacy key: " + kv.key);
             } else if (suffix != "latest" && !suffix.starts_with("snapshot/") &&
+                       !suffix.starts_with("producer_view") &&
                        !suffix.starts_with("cleanup/")) {
                 report.warnings.push_back("unknown OpLog key: " + kv.key);
             }

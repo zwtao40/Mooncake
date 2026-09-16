@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
-#include <jsoncpp/json/json.h>
+#if __has_include(<jsoncpp/json/json.h>)
+#include <jsoncpp/json/json.h>  // Ubuntu
+#else
+#include <json/json.h>  // CentOS
+#endif
 
 #include <algorithm>
 #include <sstream>
@@ -15,6 +19,10 @@ namespace {
 
 class RangeBackend : public HaKvBackend {
    public:
+    ErrorCode DeleteRange(std::string_view, std::string_view) override {
+        return ErrorCode::INVALID_PARAMS;
+    }
+
     explicit RangeBackend(std::vector<KvPair> values)
         : values_(std::move(values)) {}
 

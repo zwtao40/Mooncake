@@ -5,10 +5,38 @@
 
 #include <atomic>
 #include <chrono>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 
 namespace mooncake::test {
+
+namespace {
+
+std::optional<int64_t> FindSerializedMetricValue(
+    const std::string& metrics, const std::string& metric_name) {
+    std::istringstream lines(metrics);
+    std::string line;
+    const std::string prefix = metric_name + " ";
+    while (std::getline(lines, line)) {
+        if (line.rfind(prefix, 0) != 0) {
+            continue;
+        }
+
+        std::istringstream value_stream(line.substr(prefix.size()));
+        int64_t value = 0;
+        if (!(value_stream >> value)) {
+            return std::nullopt;
+        }
+        value_stream >> std::ws;
+        return value_stream.eof() ? std::optional<int64_t>(value)
+                                  : std::nullopt;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 class HAMetricManagerTest : public ::testing::Test {
    protected:
@@ -95,16 +123,47 @@ TEST_F(HAMetricManagerTest, TestIncWatchDisconnectionsAndAppliedEntries) {
 }
 
 TEST_F(HAMetricManagerTest, TestRecordOpLogEtcdWriteLatency) {
-    // Call histogram observe functions, mainly to ensure they do not crash
+    const std::string count_name = "ha_oplog_etcd_write_latency_us_count";
+    const std::string sum_name = "ha_oplog_etcd_write_latency_us_sum";
+    const std::string before_metrics = M().serialize_metrics();
+    const int64_t count_before =
+        FindSerializedMetricValue(before_metrics, count_name).value_or(0);
+    const int64_t sum_before =
+        FindSerializedMetricValue(before_metrics, sum_name).value_or(0);
+
     M().observe_oplog_etcd_write_latency_us(100);
     M().observe_oplog_etcd_write_latency_us(5000);
-    SUCCEED();
+
+    const std::string after_metrics = M().serialize_metrics();
+    const auto count_after =
+        FindSerializedMetricValue(after_metrics, count_name);
+    const auto sum_after = FindSerializedMetricValue(after_metrics, sum_name);
+    ASSERT_TRUE(count_after.has_value());
+    ASSERT_TRUE(sum_after.has_value());
+    EXPECT_EQ(count_before + 2, *count_after);
+    EXPECT_EQ(sum_before + 5100, *sum_after);
 }
 
 TEST_F(HAMetricManagerTest, TestRecordOpLogApplyLatency) {
+    const std::string count_name = "ha_oplog_apply_latency_us_count";
+    const std::string sum_name = "ha_oplog_apply_latency_us_sum";
+    const std::string before_metrics = M().serialize_metrics();
+    const int64_t count_before =
+        FindSerializedMetricValue(before_metrics, count_name).value_or(0);
+    const int64_t sum_before =
+        FindSerializedMetricValue(before_metrics, sum_name).value_or(0);
+
     M().observe_oplog_apply_latency_us(50);
     M().observe_oplog_apply_latency_us(1000);
-    SUCCEED();
+
+    const std::string after_metrics = M().serialize_metrics();
+    const auto count_after =
+        FindSerializedMetricValue(after_metrics, count_name);
+    const auto sum_after = FindSerializedMetricValue(after_metrics, sum_name);
+    ASSERT_TRUE(count_after.has_value());
+    ASSERT_TRUE(sum_after.has_value());
+    EXPECT_EQ(count_before + 2, *count_after);
+    EXPECT_EQ(sum_before + 1050, *sum_after);
 }
 
 #ifdef MOONCAKE_ENABLE_OPLOG_PERF_METRICS
@@ -223,6 +282,57 @@ TEST_F(HAMetricManagerTest, TestConcurrentAccess) {
 
     auto after = mgr.get_oplog_applied_entries_total();
     EXPECT_EQ(before + kThreads * kIncrementsPerThread, after);
+}
+
+TEST_F(HAMetricManagerTest, WriterOwnershipAndRangeSerialization) {
+    auto& mgr = HAMetricManager::instance();
+    const auto before = mgr.get_writer_runtime().retry_count;
+    HAMetricManager::WriterRuntimeSnapshot first;
+    first.accepting = true;
+    const auto old_owner = mgr.activate_writer_runtime(first);
+    auto serialized = mgr.serialize_metrics();
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_first_sequence"),
+        0);
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_last_sequence"),
+        0);
+
+    first.retry_count = 2;
+    first.stuck_range = std::make_pair(11, 15);
+    mgr.update_writer_runtime(old_owner, first);
+    serialized = mgr.serialize_metrics();
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_first_sequence"),
+        11);
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_last_sequence"),
+        15);
+    EXPECT_EQ(mgr.get_writer_runtime().retry_count, before + 2);
+
+    first.stuck_range.reset();
+    mgr.update_writer_runtime(old_owner, first);
+    serialized = mgr.serialize_metrics();
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_first_sequence"),
+        0);
+    EXPECT_EQ(
+        FindSerializedMetricValue(serialized, "ha_writer_stuck_last_sequence"),
+        0);
+
+    HAMetricManager::WriterRuntimeSnapshot second;
+    second.accepting = true;
+    second.durable_sequence = 20;
+    const auto new_owner = mgr.activate_writer_runtime(second);
+    first.accepting = false;
+    first.terminal_reason = "fenced";
+    mgr.update_writer_runtime(old_owner, first);
+    EXPECT_TRUE(mgr.get_writer_runtime().accepting);
+    EXPECT_EQ(mgr.get_writer_runtime().durable_sequence, 20);
+    EXPECT_TRUE(mgr.get_writer_runtime().terminal_reason.empty());
+    second.retry_count = 1;
+    mgr.update_writer_runtime(new_owner, second);
+    EXPECT_EQ(mgr.get_writer_runtime().retry_count, before + 3);
 }
 
 }  // namespace mooncake::test

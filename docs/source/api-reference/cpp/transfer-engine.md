@@ -182,6 +182,8 @@ Registers a space starting at address `addr` with a length of `length` on the lo
 - `length`: The length of the registration space;
 - `location`: The `device` corresponding to this memory segment, such as `cuda:0` indicating the GPU device, `cpu:0` indicating the CPU socket, by matching with the network card priority order table (see `installTransport`), the preferred network card is identified. You can also use `*`, Transfer Engine will try to automatically recognize the `device` corresponding to `addr`, if it fails to recognize the device, it will print a `WARNING` level log and use all network cards, no preferred network cards.
 - `remote_accessible`: Indicates whether this memory can be accessed by remote nodes.
+  For RDMA, `false` registers the buffer for local transfer use only: remote
+  read/write permissions are not granted and no `rkey` is published.
 - `update_metadata`: Whether to publish the registration to the metadata service.
 - Return value: If successful, returns 0; otherwise, returns a negative value.
 
@@ -196,6 +198,15 @@ Unregisters the region.
 - `addr`: The starting address of the registration space;
 - `update_metadata`: Whether to publish the unregistration to the metadata service.
 - Return value: If successful, returns 0; otherwise, returns a negative value.
+
+#### TransferEngine::allocateSharedMemory
+
+```cpp
+void* allocateSharedMemory(size_t length);
+int freeSharedMemory(void* addr);
+```
+
+Allocates a POSIX shared-memory region that `ShmTransport` can export to same-host peers. Ordinary `malloc` cannot be advertised this way. Requires `ShmTransport` (`MC_FORCE_SHM=1` or `installTransport("shm")`). Call `registerLocalMemory` on the returned pointer before remote access; a sub-range inside that allocation, or a length larger than the allocation, returns an error. Classic Transfer Engine only; TENT returns `nullptr` / `ERR_NOT_IMPLEMENTED`. Combining SHM with RDMA/TCP on one engine requires `-DENABLE_MULTI_PROTOCOL=ON`. Without that flag, `installTransport("shm")` logs a WARNING if it replaces an existing rdma/tcp segment protocol. Objects are created mode `0600` (same UID) with names `/mooncake_<pid>_xxxxxxxx`. `freeSharedMemory` only accepts pointers returned by `allocateSharedMemory`; a `malloc` pointer is rejected without unregistering other transports. Crash leftovers in `/dev/shm` are not reaped automatically. Peers detect an unlinked object on the next transfer, drop the orphaned mmap, and refetch metadata once; if realloc changes the virtual address, the initiator must use the new `BufferDesc.addr`.
 
 #### TransferEngine::registerLocalMemoryBatch
 
@@ -397,7 +408,7 @@ Transport* installTransport(const std::string& proto, void** args);
 
 Installs a transport backend explicitly.
 
-- `proto`: Transport protocol name, such as `rdma`, `tcp`, or `nvmeof`.
+- `proto`: Transport protocol name, such as `rdma`, `tcp`, `nvmeof`, or `shm`.
 - `args`: Transport-specific arguments.
 > Note: In TENT, `installTransport` is not exposed (removed from the public API, including compatibility surfaces). Transport selection is internal to TENT.
 
