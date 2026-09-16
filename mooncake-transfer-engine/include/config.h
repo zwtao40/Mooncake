@@ -173,6 +173,10 @@ struct GlobalConfig {
     uint64_t max_seg_size = 0x10000000000;
     size_t max_jfc_e = 4096;  // urma is temporarily using this default value.
     size_t num_jetty_per_ep = 1;
+    // urma active port: -1 (default) for auto-selection by scanning port
+    // attributes, >=0 for user-specified port index; override via
+    // MC_URMA_ACTIVE_PORT
+    int urma_active_port = -1;
 };
 
 struct RpcCommunicatorConfig {
